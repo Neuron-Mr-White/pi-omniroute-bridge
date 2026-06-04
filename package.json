@@ -1,0 +1,36 @@
+{
+  "name": "pi-omniroute-bridge",
+  "version": "0.1.0",
+  "description": "Pi extension that onboards OmniRoute and keeps Pi custom models synced from OmniRoute /v1/models.",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "pi-omniroute-bridge": "bin/pi-omniroute-bridge.mjs"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "install:pi": "node ./bin/pi-omniroute-bridge.mjs install",
+    "dev:link": "mkdir -p ~/.pi/agent/extensions && ln -sf \"$PWD/src/index.ts\" ~/.pi/agent/extensions/pi-omniroute-bridge.ts"
+  },
+  "keywords": [
+    "pi",
+    "omniroute",
+    "extension",
+    "models"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@earendil-works/pi-ai": "latest",
+    "@earendil-works/pi-coding-agent": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "typescript": "latest"
+  },
+  "files": [
+    "dist",
+    "bin",
+    "README.md"
+  ]
+}
