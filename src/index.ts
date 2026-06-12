@@ -114,9 +114,12 @@ function toNumber(value: unknown): number | undefined {
 	return undefined;
 }
 
+const NON_CHAT_TYPES = new Set(["embedding", "image", "video", "audio", "moderation", "rerank", "tts", "stt"]);
 function normalizeModel(raw: Record<string, unknown>): PiModel | null {
 	const id = typeof raw.id === "string" ? raw.id : typeof raw.name === "string" ? raw.name : undefined;
 	if (!id) return null;
+	// Skip non-chat models (embeddings, image/video generation, etc.) — pi can only use chat models.
+	if (typeof raw.type === "string" && NON_CHAT_TYPES.has(raw.type.toLowerCase())) return null;
 	const model: PiModel = { id };
 	if (typeof raw.name === "string" && raw.name !== id) model.name = raw.name;
 	else model.name = id;
@@ -127,9 +130,16 @@ function normalizeModel(raw: Record<string, unknown>): PiModel | null {
 	if (maxTokens) model.maxTokens = maxTokens;
 
 	const ownedBy = typeof raw.owned_by === "string" ? raw.owned_by : undefined;
-	const modality = JSON.stringify(raw).toLowerCase();
-	if (modality.includes("image") || id.toLowerCase().includes("vision")) model.input = ["text", "image"];
-	if (id.toLowerCase().includes("reason") || id.toLowerCase().includes("thinking")) model.reasoning = true;
+	const caps = raw.capabilities && typeof raw.capabilities === "object" ? (raw.capabilities as Record<string, unknown>) : undefined;
+	const inputModalities = Array.isArray(raw.input_modalities) ? (raw.input_modalities as unknown[]) : undefined;
+	// Vision/image input: prefer explicit metadata, fall back to id heuristic.
+	if (inputModalities?.includes("image") || caps?.vision === true || id.toLowerCase().includes("vision")) {
+		model.input = ["text", "image"];
+	}
+	// Reasoning/thinking: prefer explicit capabilities, fall back to id heuristic.
+	if (caps?.reasoning === true || caps?.thinking === true || id.toLowerCase().includes("reason") || id.toLowerCase().includes("thinking")) {
+		model.reasoning = true;
+	}
 	if (ownedBy && model.name === id) model.name = `${id} (${ownedBy})`;
 	return model;
 }
