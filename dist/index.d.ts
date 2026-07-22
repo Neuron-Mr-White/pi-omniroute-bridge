@@ -40,5 +40,5 @@ declare function syncModels(): Promise<{
     config: BridgeConfig;
     cache: CacheEntry;
 }>;
-export default function omnirouteBridge(pi: ExtensionAPI): void;
+export default function omnirouteBridge(pi: ExtensionAPI): Promise<void>;
 export { CONFIG_PATH, CACHE_PATH, PI_MODELS_PATH, syncModels };

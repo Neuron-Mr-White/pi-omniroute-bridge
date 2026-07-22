@@ -1,7 +1,6 @@
 import { Type } from "@earendil-works/pi-ai";
-import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { defineTool, type ExtensionAPI, type ProviderConfig } from "@earendil-works/pi-coding-agent";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 
@@ -67,6 +66,35 @@ function v1BaseUrl(baseUrl: string): string {
 
 function endpoint(baseUrl: string, suffix: string): string {
 	return `${v1BaseUrl(baseUrl)}/${suffix.replace(/^\/+/, "")}`;
+}
+
+function providerConfig(config: BridgeConfig, models: PiModel[]): ProviderConfig {
+	return {
+		baseUrl: v1BaseUrl(config.baseUrl),
+		// Dynamic provider registration can use the stored key directly, which makes
+		// the bridge survive Pi restarts even when the user's shell did not export it.
+		apiKey: config.apiKey || "$OMNI_API_KEY",
+		api: "openai-completions",
+		authHeader: true,
+		models: models.map((model) => ({
+			...model,
+			name: model.name ?? model.id,
+			reasoning: model.reasoning ?? false,
+			input: (model.input as ("text" | "image")[] | undefined) ?? ["text"],
+			cost: {
+				input: model.cost?.input ?? 0,
+				output: model.cost?.output ?? 0,
+				cacheRead: model.cost?.cacheRead ?? 0,
+				cacheWrite: model.cost?.cacheWrite ?? 0,
+			},
+			contextWindow: model.contextWindow ?? 128000,
+			maxTokens: model.maxTokens ?? 16384,
+		})),
+	};
+}
+
+function hydrateOmniApiKey(config: BridgeConfig) {
+	if (config.apiKey) process.env.OMNI_API_KEY = config.apiKey;
 }
 
 async function ensureConfigDir() {
@@ -178,13 +206,7 @@ async function fetchOmniRouteModels(config: BridgeConfig): Promise<{ models: PiM
 async function updatePiModels(config: BridgeConfig, models: PiModel[]) {
 	const piModels = await readJson<PiModelsJson>(PI_MODELS_PATH, { providers: {} });
 	piModels.providers ??= {};
-	piModels.providers[config.providerId || PROVIDER_ID] = {
-		baseUrl: v1BaseUrl(config.baseUrl),
-		apiKey: "$OMNI_API_KEY",
-		api: "openai-completions",
-		authHeader: true,
-		models,
-	};
+	piModels.providers[config.providerId || PROVIDER_ID] = providerConfig({ ...config, apiKey: undefined }, models);
 	await atomicWriteJson(PI_MODELS_PATH, piModels);
 }
 
@@ -209,6 +231,7 @@ async function syncModels(): Promise<{ config: BridgeConfig; cache: CacheEntry }
 
 async function maybeDailySync(ctx: { ui: { notify(message: string, type?: "info" | "warning" | "error"): void } }) {
 	const config = await loadConfig();
+	hydrateOmniApiKey(config);
 	if (!config.enabled || !config.dailySync) return;
 	const last = config.lastSyncAt ? Date.parse(config.lastSyncAt) : 0;
 	const interval = Math.max(1, config.syncIntervalHours || 24) * 60 * 60 * 1000;
@@ -236,7 +259,14 @@ const statusTool = defineTool({
 	},
 });
 
-export default function omnirouteBridge(pi: ExtensionAPI) {
+export default async function omnirouteBridge(pi: ExtensionAPI) {
+	const startupConfig = await loadConfig();
+	hydrateOmniApiKey(startupConfig);
+	const startupCache = await readJson<CacheEntry | null>(CACHE_PATH, null);
+	if (startupConfig.enabled && startupCache?.models?.length) {
+		pi.registerProvider(startupConfig.providerId || PROVIDER_ID, providerConfig(startupConfig, startupCache.models));
+	}
+
 	pi.registerTool(statusTool);
 
 	pi.registerCommand("omniroute-onboard", {
@@ -257,17 +287,19 @@ export default function omnirouteBridge(pi: ExtensionAPI) {
 				providerId: current.providerId || PROVIDER_ID,
 			};
 			await saveConfig(config);
-			process.env.OMNI_API_KEY = config.apiKey;
+			hydrateOmniApiKey(config);
 			const { cache } = await syncModels();
-			ctx.ui.notify(`OmniRoute onboarded and synced ${cache.models.length} models. Export OMNI_API_KEY in your shell and run /reload.`, "info");
+			pi.registerProvider(config.providerId || PROVIDER_ID, providerConfig(config, cache.models));
+			ctx.ui.notify(`OmniRoute onboarded and synced ${cache.models.length} models. OmniRoute is registered for this session and future restarts.`, "info");
 		},
 	});
 
 	pi.registerCommand("omniroute-sync", {
 		description: "Fetch OmniRoute /v1/models and update Pi ~/.pi/agent/models.json.",
 		handler: async (_args, ctx) => {
-			const { cache } = await syncModels();
-			ctx.ui.notify(`OmniRoute synced ${cache.models.length} models to ${PI_MODELS_PATH}. Run /reload if needed.`, "info");
+			const { config, cache } = await syncModels();
+			pi.registerProvider(config.providerId || PROVIDER_ID, providerConfig(config, cache.models));
+			ctx.ui.notify(`OmniRoute synced and registered ${cache.models.length} models to ${PI_MODELS_PATH}.`, "info");
 		},
 	});
 
@@ -298,6 +330,11 @@ export default function omnirouteBridge(pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		await maybeDailySync(ctx);
+		const config = await loadConfig();
+		const cache = await readJson<CacheEntry | null>(CACHE_PATH, null);
+		if (config.enabled && cache?.models?.length) {
+			pi.registerProvider(config.providerId || PROVIDER_ID, providerConfig(config, cache.models));
+		}
 	});
 }
 
