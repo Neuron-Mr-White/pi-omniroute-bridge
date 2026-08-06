@@ -193,10 +193,14 @@ function extractModels(payload: unknown, config: BridgeConfig): PiModel[] {
 	return models.sort((a, b) => a.id.localeCompare(b.id));
 }
 
+/** Give up on /v1/models rather than hang; the on-disk cache is good enough. */
+const FETCH_TIMEOUT_MS = 15_000;
+
 async function fetchOmniRouteModels(config: BridgeConfig): Promise<{ models: PiModel[]; raw: unknown }> {
 	if (!config.apiKey) throw new Error("OMNI_API_KEY is not configured. Run /omniroute-onboard first.");
 	const response = await fetch(endpoint(config.baseUrl, "models"), {
 		headers: { Authorization: `Bearer ${config.apiKey}` },
+		signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
 	});
 	if (!response.ok) throw new Error(`GET /v1/models failed: ${response.status} ${response.statusText} ${await response.text()}`);
 	const raw = await response.json() as unknown;
@@ -329,12 +333,18 @@ export default async function omnirouteBridge(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
-		await maybeDailySync(ctx);
+		// Register from the on-disk cache first so models are available
+		// immediately, then refresh in the background. Awaiting the sync here
+		// put a network round-trip on the startup path for data we already have.
 		const config = await loadConfig();
+		// Keep the key in the environment for model requests; maybeDailySync also
+		// does this, but it no longer runs before we return.
+		hydrateOmniApiKey(config);
 		const cache = await readJson<CacheEntry | null>(CACHE_PATH, null);
 		if (config.enabled && cache?.models?.length) {
 			pi.registerProvider(config.providerId || PROVIDER_ID, providerConfig(config, cache.models));
 		}
+		void maybeDailySync(ctx);
 	});
 }
 
