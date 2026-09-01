@@ -341,10 +341,38 @@ function creditsRow(labelWidth, label, quota) {
     const capNote = quota.unlimited ? "· unlimited" : `${Math.round(quota.remainingPercentage ?? 0)}% left`;
     return `${label.padEnd(labelWidth)} ${symbol}${amount}  ${capNote}`;
 }
-function renderConnection(name, entry) {
-    const label = name || "connection";
+const PROVIDER_LABELS = {
+    antigravity: "Antigravity",
+    agy: "Antigravity",
+    claude: "Anthropic",
+    codex: "Codex",
+    deepseek: "DeepSeek",
+    "devin-cli": "Devin",
+    "devin-cli-agentic": "Devin",
+    "devin-desktop": "Devin",
+    openrouter: "OpenRouter",
+    zai: "Zai",
+    glm: "GLM",
+    "glm-cn": "GLM",
+    glmt: "GLM",
+    kimi: "Kimi",
+    "kimi-coding": "Kimi",
+    minimax: "MiniMax",
+    qoder: "Qoder",
+    vertex: "Vertex",
+    xai: "xAI",
+};
+function providerLabel(provider) {
+    const mapped = PROVIDER_LABELS[provider];
+    if (mapped)
+        return mapped;
+    return provider.charAt(0).toUpperCase() + provider.slice(1);
+}
+function renderConnection(provider, name, entry) {
+    const conn = name || provider;
+    const providerName = providerLabel(provider);
     if (!entry.quotas || Object.keys(entry.quotas).length === 0) {
-        return `${label}: ${entry.message ?? "no quota data"}`;
+        return `${providerName} — ${conn}: ${entry.message ?? "no quota data"}`;
     }
     const rows = [];
     for (const [key, quota] of Object.entries(entry.quotas)) {
@@ -363,7 +391,15 @@ function renderConnection(name, entry) {
     }
     const labelWidth = Math.max(10, ...rows.map((row) => row.label.length));
     const lines = rows.map((row) => row.credits ? creditsRow(labelWidth, row.label, row.quota) : windowRow(labelWidth, row.label, row.quota));
-    const header = entry.plan ? `${label} (${entry.plan})` : label;
+    // Header describes provider + connection + plan, e.g.
+    // "Zai — xxxxxxace (Max plan)". When the connection name already leads with
+    // the provider (users rename connections to carry plan/pricing notes), don't
+    // duplicate it. A plan that merely repeats the provider ("OpenRouter",
+    // "DeepSeek") also adds nothing and is dropped.
+    const plan = (entry.plan ?? "").trim();
+    const planSuffix = plan && plan.toLowerCase() !== providerName.toLowerCase() ? ` (${plan} plan)` : "";
+    const connLeadsWithProvider = conn.toLowerCase().startsWith(providerName.toLowerCase());
+    const header = connLeadsWithProvider ? `${conn}${planSuffix}` : `${providerName} — ${conn}${planSuffix}`;
     return [header, ...lines].join("\n");
 }
 export default async function omnirouteBridge(pi) {
@@ -485,7 +521,7 @@ export default async function omnirouteBridge(pi) {
                     const entry = usageCache.caches[ref.connectionId];
                     if (!entry)
                         continue;
-                    blocks.push(renderConnection(ref.name ?? ref.provider, entry));
+                    blocks.push(renderConnection(ref.provider, ref.name, entry));
                 }
                 if (blocks.length === 0) {
                     return ctx.ui.notify("No OmniRoute quota caches yet. The router refreshes them on its Provider Limits schedule; try again shortly.", "warning");
