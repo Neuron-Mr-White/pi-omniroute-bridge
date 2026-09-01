@@ -11,6 +11,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "install:pi": "node ./bin/pi-omniroute-bridge.mjs install",
+    "sync:dsh": "node ./bin/dsh-omniroute-sync.mjs",
     "dev:link": "mkdir -p ~/.pi/agent/extensions && ln -sf \"$PWD/src/index.ts\" ~/.pi/agent/extensions/pi-omniroute-bridge.ts"
   },
   "keywords": [

@@ -41,6 +41,35 @@ npm run dev:link
 - `/omniroute-config edit` — edit JSON config, including filters and sync interval.
 - `/omniroute-cache` — summarize cached models.
 
+## DeepSeek Harness (dsh)
+
+The same OmniRoute catalog is exposed to the DeepSeek Harness through its
+pi-ai multi-provider adapter (`llm-pi-ai`), which reads provider profiles from
+the harness user-settings document (`$DSH_HOME/settings.yaml`, hot-reloaded —
+no restart needed). The bridge ships a sync script that mirrors the Pi
+workflow for dsh:
+
+```bash
+npm run sync:dsh
+```
+
+What it does:
+
+- Fetches `GET {baseUrl}/v1/models` with the bridge's stored API key (override
+  with `--base-url` / `--api-key`, or `OMNI_API_KEY`).
+- Normalizes every chat-capable model (non-chat entries like embedding,
+  rerank, image/audio generation are skipped) into a pi-ai provider profile.
+- Merges the `llm-pi-ai.providers.omniroute` section into
+  `$DSH_HOME/settings.yaml`, preserving every other top-level section.
+- Stores `OMNI_API_KEY` in the harness credential store
+  (`$DSH_HOME/.credentials.yaml`) — the same place the web Models page writes
+  credentials; secrets never live in `settings.yaml`.
+
+After a sync, the harness Model selector / Models page shows an **OmniRoute**
+provider group with every synced model (currently ~1.5k), selectable next to
+the native DeepSeek route. Useful flags: `--dry-run`, `--no-credential`,
+`--dsh-home <dir>`.
+
 ## Files
 
 Bridge-owned files:
