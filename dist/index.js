@@ -326,7 +326,10 @@ function windowRow(labelWidth, label, quota) {
     const used = Number(quota.used ?? 0);
     const remainingPct = Number(quota.remainingPercentage ?? 0);
     const percentUsed = total > 0 ? (used / total) * 100 : Math.max(0, 100 - remainingPct);
-    const filled = Math.round(Math.min(100, Math.max(0, percentUsed)) / 5);
+    // Water-tank semantics: the bar shows what is LEFT — full at 100% remaining,
+    // empty at 0%.
+    const percentLeft = Math.min(100, Math.max(0, 100 - percentUsed));
+    const filled = Math.round(percentLeft / 5);
     const bar = "■".repeat(filled) + "·".repeat(20 - filled);
     const reset = formatReset(quota.resetAt);
     const resetPart = reset ? ` · ${reset}` : "";
