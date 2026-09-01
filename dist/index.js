@@ -126,6 +126,30 @@ function normalizeModel(raw) {
     if (caps?.reasoning === true || caps?.thinking === true || id.toLowerCase().includes("reason") || id.toLowerCase().includes("thinking")) {
         model.reasoning = true;
     }
+    // Map OmniRoute's declared effort tiers onto pi's thinkingLevelMap so the
+    // model picker exposes the model's real vocabulary. Convention: canonical
+    // order is none < minimal < low < medium < high < xhigh < max, and xhigh is
+    // OmniRoute's internal top tier that normalizes to a native `max` upstream.
+    const rawTiers = caps?.effort_tiers ?? raw.effort_tiers;
+    const effortTiers = Array.isArray(rawTiers) ? rawTiers.filter((t) => typeof t === "string") : [];
+    if (model.reasoning && effortTiers.length > 0) {
+        const canDisable = effortTiers.includes("none");
+        const lowest = effortTiers.find((t) => t !== "none");
+        const highest = effortTiers[effortTiers.length - 1];
+        const map = {};
+        if (lowest && !canDisable) {
+            // Upstream cannot turn thinking off (e.g. GLM-5.3 always reasons), so
+            // pi's "off"/"minimal" map to the floor tier instead of a disabled request.
+            map.off = lowest;
+            map.minimal = lowest;
+        }
+        if (highest === "max" || highest === "xhigh")
+            map.xhigh = highest;
+        if (effortTiers.includes("max"))
+            map.max = "max";
+        if (Object.keys(map).length > 0)
+            model.thinkingLevelMap = map;
+    }
     if (ownedBy && model.name === id)
         model.name = `${id} (${ownedBy})`;
     return model;
@@ -226,6 +250,122 @@ const statusTool = defineTool({
         };
     },
 });
+const USAGE_CACHE_TTL_MS = 60_000;
+let usageCache = null;
+const USAGE_LABELS = {
+    session: "Daily",
+    "session (5h)": "Daily",
+    daily: "Daily",
+    weekly: "Weekly",
+    "weekly (7d)": "Weekly",
+    monthly: "Monthly",
+    credits: "AI Credits",
+    free_daily: "Free · daily",
+    free_rpm: "Free · rpm",
+};
+async function fetchManagementJson(config, suffix) {
+    if (!config.apiKey)
+        throw new Error("OMNI_API_KEY is not configured. Run /omniroute-onboard first.");
+    const response = await fetch(`${normalizeBaseUrl(config.baseUrl)}/api/${suffix.replace(/^\/+/, "")}`, {
+        headers: { Authorization: `Bearer ${config.apiKey}`, Accept: "application/json" },
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+    if (!response.ok) {
+        throw new Error(`GET /api/${suffix} failed: ${response.status} ${response.statusText}`);
+    }
+    return response.json();
+}
+/** Active connection refs (provider + connection name) for /usage completions. */
+async function fetchQuotaProviderRefs(config) {
+    const payload = await fetchManagementJson(config, "usage/quota");
+    const providers = Array.isArray(payload?.providers) ? payload.providers : [];
+    return providers
+        .filter((p) => typeof p?.connectionId === "string" && typeof p?.provider === "string")
+        .map((p) => ({ provider: p.provider, name: p.name, connectionId: p.connectionId }));
+}
+async function fetchProviderLimitsCaches(config) {
+    const payload = await fetchManagementJson(config, "usage/provider-limits");
+    return payload?.caches && typeof payload.caches === "object" ? payload.caches : {};
+}
+async function loadUsageSnapshot(config, force = false) {
+    if (!force && usageCache && Date.now() - usageCache.fetchedAt < USAGE_CACHE_TTL_MS) {
+        return usageCache;
+    }
+    const [refs, caches] = await Promise.all([fetchQuotaProviderRefs(config), fetchProviderLimitsCaches(config)]);
+    usageCache = { refs, caches, fetchedAt: Date.now() };
+    return usageCache;
+}
+function formatReset(resetAt) {
+    if (!resetAt)
+        return "";
+    const reset = Date.parse(resetAt);
+    if (!Number.isFinite(reset))
+        return "";
+    const diff = reset - Date.now();
+    if (diff <= 0)
+        return "reset";
+    if (diff < 24 * 60 * 60 * 1000) {
+        const hours = Math.floor(diff / 3_600_000);
+        const minutes = Math.max(1, Math.round((diff % 3_600_000) / 60_000));
+        return hours > 0 ? `resets in ${hours}h ${minutes}m` : `resets in ${minutes}m`;
+    }
+    const wall = new Intl.DateTimeFormat(undefined, {
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+    }).format(reset);
+    const offsetMin = -new Date().getTimezoneOffset();
+    const sign = offsetMin < 0 ? "-" : "+";
+    const abs = Math.abs(offsetMin);
+    const offset = `UTC${sign}${Math.floor(abs / 60)}${abs % 60 ? `:${String(abs % 60).padStart(2, "0")}` : ""}`;
+    return `resets ${wall} (${offset})`;
+}
+function windowRow(labelWidth, label, quota) {
+    const total = Number(quota.total ?? 0);
+    const used = Number(quota.used ?? 0);
+    const remainingPct = Number(quota.remainingPercentage ?? 0);
+    const percentUsed = total > 0 ? (used / total) * 100 : Math.max(0, 100 - remainingPct);
+    const filled = Math.round(Math.min(100, Math.max(0, percentUsed)) / 5);
+    const bar = "■".repeat(filled) + "·".repeat(20 - filled);
+    const reset = formatReset(quota.resetAt);
+    const resetPart = reset ? ` · ${reset}` : "";
+    return `${label.padEnd(labelWidth)} ${bar}  ${Math.round(percentUsed)}% used${resetPart}`;
+}
+function creditsRow(labelWidth, label, quota) {
+    const symbol = quota.currency === "USD" ? "$" : `${quota.currency ?? "USD"} `;
+    const amount = Number(quota.remaining ?? 0).toLocaleString(undefined, {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+    });
+    const capNote = quota.unlimited ? "· unlimited" : `${Math.round(quota.remainingPercentage ?? 0)}% left`;
+    return `${label.padEnd(labelWidth)} ${symbol}${amount}  ${capNote}`;
+}
+function renderConnection(name, entry) {
+    const label = name || "connection";
+    if (!entry.quotas || Object.keys(entry.quotas).length === 0) {
+        return `${label}: ${entry.message ?? "no quota data"}`;
+    }
+    const rows = [];
+    for (const [key, quota] of Object.entries(entry.quotas)) {
+        if (!quota || typeof quota !== "object")
+            continue;
+        if (quota.currency) {
+            // Negative balances are upstream accounting dust (e.g. a near-empty
+            // secondary-currency wallet) — skip them; a 0 balance still shows.
+            if (Number(quota.remaining ?? 0) <= 0)
+                continue;
+            rows.push({ label: USAGE_LABELS.credits ?? "AI Credits", quota, credits: true });
+        }
+        else {
+            rows.push({ label: quota.displayName || USAGE_LABELS[key] || key, quota, credits: false });
+        }
+    }
+    const labelWidth = Math.max(10, ...rows.map((row) => row.label.length));
+    const lines = rows.map((row) => row.credits ? creditsRow(labelWidth, row.label, row.quota) : windowRow(labelWidth, row.label, row.quota));
+    const header = entry.plan ? `${label} (${entry.plan})` : label;
+    return [header, ...lines].join("\n");
+}
 export default async function omnirouteBridge(pi) {
     const startupConfig = await loadConfig();
     hydrateOmniApiKey(startupConfig);
@@ -291,6 +431,69 @@ export default async function omnirouteBridge(pi) {
                 return ctx.ui.notify("No OmniRoute model cache yet. Run /omniroute-sync.", "warning");
             const preview = cache.models.slice(0, 12).map((m) => m.id).join(", ");
             ctx.ui.notify(`OmniRoute cache: ${cache.models.length} models fetched ${cache.fetchedAt}. ${preview}${cache.models.length > 12 ? ", …" : ""}`, "info");
+        },
+    });
+    pi.registerCommand("usage", {
+        description: "Show OmniRoute provider quota (windows + credits). Optionally pass a provider name.",
+        getArgumentCompletions: async (argumentPrefix) => {
+            const config = await loadConfig();
+            if (!config.enabled || !config.apiKey)
+                return null;
+            try {
+                const snapshot = await loadUsageSnapshot(config);
+                const query = argumentPrefix.trim().toLowerCase();
+                const byProvider = new Map();
+                for (const ref of snapshot.refs) {
+                    const hit = byProvider.get(ref.provider) ?? { count: 0, plans: new Set() };
+                    hit.count += 1;
+                    const plan = snapshot.caches[ref.connectionId]?.plan;
+                    if (plan)
+                        hit.plans.add(plan);
+                    byProvider.set(ref.provider, hit);
+                }
+                return [...byProvider.entries()]
+                    .filter(([provider]) => !query || provider.toLowerCase().startsWith(query))
+                    .sort(([a], [b]) => a.localeCompare(b))
+                    .map(([provider, info]) => ({
+                    value: provider,
+                    label: provider,
+                    description: [...info.plans].join(", ") || `${info.count} connection${info.count === 1 ? "" : "s"}`,
+                }));
+            }
+            catch {
+                return null;
+            }
+        },
+        handler: async (args, ctx) => {
+            const config = await loadConfig();
+            if (!config.enabled)
+                return ctx.ui.notify("OmniRoute bridge is disabled.", "warning");
+            ctx.ui.notify("Fetching quota…", "info");
+            try {
+                await loadUsageSnapshot(config, true);
+                const arg = args.trim().toLowerCase();
+                const matches = arg
+                    ? usageCache.refs.filter((ref) => ref.provider.toLowerCase() === arg)
+                    : usageCache.refs;
+                if (matches.length === 0) {
+                    const available = [...new Set(usageCache.refs.map((r) => r.provider))].sort().join(", ");
+                    return ctx.ui.notify(`No active OmniRoute connection for "${args.trim()}". Available: ${available || "none"}`, "warning");
+                }
+                const blocks = [];
+                for (const ref of matches) {
+                    const entry = usageCache.caches[ref.connectionId];
+                    if (!entry)
+                        continue;
+                    blocks.push(renderConnection(ref.name ?? ref.provider, entry));
+                }
+                if (blocks.length === 0) {
+                    return ctx.ui.notify("No OmniRoute quota caches yet. The router refreshes them on its Provider Limits schedule; try again shortly.", "warning");
+                }
+                ctx.ui.notify(blocks.join("\n\n"), "info");
+            }
+            catch (error) {
+                ctx.ui.notify(`OmniRoute usage failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+            }
         },
     });
     pi.on("session_start", async (_event, ctx) => {
