@@ -395,14 +395,21 @@ function renderConnection(provider, name, entry) {
     const labelWidth = Math.max(10, ...rows.map((row) => row.label.length));
     const lines = rows.map((row) => row.credits ? creditsRow(labelWidth, row.label, row.quota) : windowRow(labelWidth, row.label, row.quota));
     // Header describes provider + connection + plan, e.g.
-    // "Zai — xxxxxxace (Max plan)". When the connection name already leads with
-    // the provider (users rename connections to carry plan/pricing notes), don't
-    // duplicate it. A plan that merely repeats the provider ("OpenRouter",
-    // "DeepSeek") also adds nothing and is dropped.
+    // "Antigravity desmond -> neuron9801 $200 Subs (Antigravity Ultra plan)".
+    // The provider name rides inside the plan suffix so bare plan codenames
+    // ("Ultra", "pro") stay unambiguous; a plan that merely repeats the
+    // provider collapses to "(DeepSeek plan)". When the connection name already
+    // leads with the provider, the prefix is not duplicated.
     const plan = (entry.plan ?? "").trim();
-    const planSuffix = plan && plan.toLowerCase() !== providerName.toLowerCase() ? ` (${plan} plan)` : "";
+    const planPart = plan
+        ? plan.toLowerCase() === providerName.toLowerCase()
+            ? providerName
+            : `${providerName} ${plan}`
+        : null;
+    const planSuffix = planPart ? ` (${planPart} plan)` : "";
     const connLeadsWithProvider = conn.toLowerCase().startsWith(providerName.toLowerCase());
-    const header = connLeadsWithProvider ? `${conn}${planSuffix}` : `${providerName} — ${conn}${planSuffix}`;
+    const prefix = connLeadsWithProvider ? "" : `${providerName} — `;
+    const header = `${prefix}${conn}${planSuffix}`;
     return [header, ...lines].join("\n");
 }
 export default async function omnirouteBridge(pi) {
