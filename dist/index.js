@@ -472,9 +472,10 @@ export default async function omnirouteBridge(pi) {
             try {
                 await loadUsageSnapshot(config, true);
                 const arg = args.trim().toLowerCase();
-                const matches = arg
+                const matches = (arg
                     ? usageCache.refs.filter((ref) => ref.provider.toLowerCase() === arg)
-                    : usageCache.refs;
+                    : usageCache.refs).slice().sort((a, b) => a.provider.localeCompare(b.provider) ||
+                    (a.name ?? "").localeCompare(b.name ?? ""));
                 if (matches.length === 0) {
                     const available = [...new Set(usageCache.refs.map((r) => r.provider))].sort().join(", ");
                     return ctx.ui.notify(`No active OmniRoute connection for "${args.trim()}". Available: ${available || "none"}`, "warning");
