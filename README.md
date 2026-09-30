@@ -33,6 +33,16 @@ For development without building:
 npm run dev:link
 ```
 
+### Host packages
+
+`@earendil-works/pi-ai` and `@earendil-works/pi-coding-agent` are supplied by
+the running Pi host and must stay in `peerDependencies` ("*"), never in
+`dependencies`. A local copy in `node_modules` would shadow Pi's module
+mapping and create duplicate runtime modules. `.npmrc` sets
+`legacy-peer-deps` so npm does not auto-install the peers; typecheck resolves
+their types from the aliased devDependencies (`host-pi-ai`,
+`host-pi-coding-agent`) wired up in `tsconfig.json` `paths`.
+
 ## Commands
 
 - `/omniroute-onboard` — prompt for base URL + `OMNI_API_KEY`, choose daily sync, run first sync.

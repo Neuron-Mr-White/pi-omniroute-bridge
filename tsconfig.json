@@ -11,7 +11,11 @@
     "rootDir": "src",
     "declaration": true,
     "sourceMap": true,
-    "types": ["node"]
+    "types": ["node"],
+    "paths": {
+      "@earendil-works/pi-ai": ["./node_modules/host-pi-ai/dist/index.d.ts"],
+      "@earendil-works/pi-coding-agent": ["./node_modules/host-pi-coding-agent/dist/index.d.ts"]
+    }
   },
   "include": ["src/**/*.ts"]
 }

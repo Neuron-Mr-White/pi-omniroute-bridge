@@ -21,13 +21,15 @@
     "models"
   ],
   "license": "MIT",
-  "dependencies": {
-    "@earendil-works/pi-ai": "latest",
-    "@earendil-works/pi-coding-agent": "latest"
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
   },
   "devDependencies": {
     "@types/node": "latest",
-    "typescript": "latest"
+    "typescript": "latest",
+    "host-pi-ai": "npm:@earendil-works/pi-ai@^0.99.1",
+    "host-pi-coding-agent": "npm:@earendil-works/pi-coding-agent@^0.99.1"
   },
   "files": [
     "dist",
