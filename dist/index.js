@@ -97,6 +97,26 @@ function toNumber(value) {
     return undefined;
 }
 const NON_CHAT_TYPES = new Set(["embedding", "image", "video", "audio", "moderation", "rerank", "tts", "stt"]);
+/** OmniRoute pricing is USD per 1M tokens — the same unit pi's cost uses. */
+function pricingToCost(pricing) {
+    if (!pricing || typeof pricing !== "object")
+        return undefined;
+    const raw = pricing;
+    const cost = {};
+    const input = toNumber(raw.input);
+    const output = toNumber(raw.output);
+    const cacheRead = toNumber(raw.cached);
+    const cacheWrite = toNumber(raw.cache_creation);
+    if (input !== undefined)
+        cost.input = input;
+    if (output !== undefined)
+        cost.output = output;
+    if (cacheRead !== undefined)
+        cost.cacheRead = cacheRead;
+    if (cacheWrite !== undefined)
+        cost.cacheWrite = cacheWrite;
+    return Object.keys(cost).length > 0 ? cost : undefined;
+}
 function normalizeModel(raw) {
     const id = typeof raw.id === "string" ? raw.id : typeof raw.name === "string" ? raw.name : undefined;
     if (!id)
@@ -115,6 +135,9 @@ function normalizeModel(raw) {
     const maxTokens = toNumber(raw.maxTokens ?? raw.max_tokens ?? raw.max_output_tokens);
     if (maxTokens)
         model.maxTokens = maxTokens;
+    const nativeCost = pricingToCost(raw.pricing);
+    if (nativeCost)
+        model.cost = nativeCost;
     const ownedBy = typeof raw.owned_by === "string" ? raw.owned_by : undefined;
     const caps = raw.capabilities && typeof raw.capabilities === "object" ? raw.capabilities : undefined;
     const inputModalities = Array.isArray(raw.input_modalities) ? raw.input_modalities : undefined;
@@ -154,7 +177,7 @@ function normalizeModel(raw) {
         model.name = `${id} (${ownedBy})`;
     return model;
 }
-function extractModels(payload, config) {
+function extractModels(payload, config, pricing) {
     const data = payload && typeof payload === "object" && Array.isArray(payload.data)
         ? payload.data
         : Array.isArray(payload) ? payload : [];
@@ -175,23 +198,96 @@ function extractModels(payload, config) {
         if (seen.has(model.id))
             continue;
         seen.add(model.id);
+        if (!model.cost && pricing) {
+            const rawItem = item;
+            model.cost = resolvePricing(model.id, typeof rawItem.owned_by === "string" ? rawItem.owned_by : undefined, typeof rawItem.root === "string" ? rawItem.root : undefined, pricing);
+        }
+        // `:free` variants genuinely cost nothing; make that explicit.
+        if (!model.cost && model.id.toLowerCase().includes(":free")) {
+            model.cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+        }
         models.push(model);
     }
     return models.sort((a, b) => a.id.localeCompare(b.id));
 }
 /** Give up on /v1/models rather than hang; the on-disk cache is good enough. */
 const FETCH_TIMEOUT_MS = 15_000;
+// /v1/models only prices a minority of models natively; the full table lives at
+// GET /api/pricing, keyed by provider alias (claude under `cc`/`anthropic`,
+// codex under `cx`/`openai`, …). Map every alias a model id might use onto its
+// table keys.
+const PROVIDER_ALIASES = {
+    claude: ["cc", "anthropic"],
+    codex: ["cx", "openai"],
+    ds: ["deepseek"],
+    deepseek: ["deepseek"],
+    antigravity: ["antigravity", "ag"],
+    ag: ["ag", "antigravity"],
+    opencode: ["oc"],
+    cc: ["cc", "anthropic"],
+    cx: ["cx", "openai"],
+};
+/** Flatten to lowercase `provider/modelId` keys so lookups are case-insensitive. */
+function indexPricingTable(table) {
+    const index = new Map();
+    for (const [provider, models] of Object.entries(table)) {
+        if (!models || typeof models !== "object")
+            continue;
+        for (const [modelId, entry] of Object.entries(models)) {
+            if (entry && typeof entry === "object")
+                index.set(`${provider}/${modelId}`.toLowerCase(), entry);
+        }
+    }
+    return index;
+}
+const EFFORT_SUFFIX_RE = /-(?:none|minimal|low|medium|high|xhigh|max|ultra|tiered)$/i;
+/** Best-effort cost lookup, e.g. `cc/claude-opus-5` → table["cc"]["claude-opus-5"]. */
+function resolvePricing(id, ownedBy, root, index) {
+    const strippedId = id.replace(/^no-think\//i, "");
+    const slash = strippedId.indexOf("/");
+    const prefix = slash > 0 ? strippedId.slice(0, slash) : undefined;
+    const base = (root ?? (prefix ? strippedId.slice(slash + 1) : strippedId)).replace(/^no-think\//i, "");
+    const providers = new Set();
+    for (const name of [prefix, ownedBy]) {
+        if (!name)
+            continue;
+        const lower = name.toLowerCase();
+        providers.add(lower);
+        for (const alias of PROVIDER_ALIASES[lower] ?? [])
+            providers.add(alias);
+    }
+    const noEffort = base.replace(EFFORT_SUFFIX_RE, "");
+    const variants = [base, base.replace(/:batch$/i, ""), noEffort, noEffort.replace(/:batch$/i, "")];
+    for (const provider of providers) {
+        for (const variant of variants) {
+            const cost = pricingToCost(index.get(`${provider}/${variant}`.toLowerCase()));
+            if (cost)
+                return cost;
+        }
+    }
+    return undefined;
+}
+function pricedCount(models) {
+    return models.filter((m) => m.cost !== undefined).length;
+}
 async function fetchOmniRouteModels(config) {
     if (!config.apiKey)
         throw new Error("OMNI_API_KEY is not configured. Run /omniroute-onboard first.");
-    const response = await fetch(endpoint(config.baseUrl, "models"), {
-        headers: { Authorization: `Bearer ${config.apiKey}` },
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    });
-    if (!response.ok)
-        throw new Error(`GET /v1/models failed: ${response.status} ${response.statusText} ${await response.text()}`);
-    const raw = await response.json();
-    return { models: extractModels(raw, config), raw };
+    // Pricing is best-effort: on failure the table is undefined and models that
+    // lack native pricing simply keep cost 0.
+    const [modelsResponse, pricingIndex] = await Promise.all([
+        fetch(endpoint(config.baseUrl, "models"), {
+            headers: { Authorization: `Bearer ${config.apiKey}` },
+            signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        }),
+        fetchManagementJson(config, "pricing")
+            .then((payload) => (payload && typeof payload === "object" ? indexPricingTable(payload) : undefined))
+            .catch(() => undefined),
+    ]);
+    if (!modelsResponse.ok)
+        throw new Error(`GET /v1/models failed: ${modelsResponse.status} ${modelsResponse.statusText} ${await modelsResponse.text()}`);
+    const raw = await modelsResponse.json();
+    return { models: extractModels(raw, config, pricingIndex), raw };
 }
 async function updatePiModels(config, models) {
     const piModels = await readJson(PI_MODELS_PATH, { providers: {} });
@@ -230,7 +326,7 @@ async function maybeDailySync(ctx) {
         return;
     try {
         const { cache } = await syncModels();
-        ctx.ui.notify(`OmniRoute synced ${cache.models.length} models. Use /reload or restart pi if /model does not update immediately.`, "info");
+        ctx.ui.notify(`OmniRoute synced ${cache.models.length} models (${pricedCount(cache.models)} priced). Use /reload or restart pi if /model does not update immediately.`, "info");
     }
     catch (error) {
         ctx.ui.notify(`OmniRoute daily sync failed: ${error instanceof Error ? error.message : String(error)}`, "warning");
@@ -245,7 +341,7 @@ const statusTool = defineTool({
         const config = await loadConfig();
         const cache = await readJson(CACHE_PATH, null);
         return {
-            content: [{ type: "text", text: JSON.stringify({ ...config, apiKey: redact(config.apiKey), cache: cache ? { fetchedAt: cache.fetchedAt, modelCount: cache.models.length, baseUrl: cache.baseUrl } : null }, null, 2) }],
+            content: [{ type: "text", text: JSON.stringify({ ...config, apiKey: redact(config.apiKey), cache: cache ? { fetchedAt: cache.fetchedAt, modelCount: cache.models.length, pricedCount: pricedCount(cache.models), baseUrl: cache.baseUrl } : null }, null, 2) }],
             details: { config: { ...config, apiKey: redact(config.apiKey) }, cache },
         };
     },
@@ -451,7 +547,7 @@ export default async function omnirouteBridge(pi) {
         handler: async (_args, ctx) => {
             const { config, cache } = await syncModels();
             pi.registerProvider(config.providerId || PROVIDER_ID, providerConfig(config, cache.models));
-            ctx.ui.notify(`OmniRoute synced and registered ${cache.models.length} models to ${PI_MODELS_PATH}.`, "info");
+            ctx.ui.notify(`OmniRoute synced and registered ${cache.models.length} models (${pricedCount(cache.models)} priced) to ${PI_MODELS_PATH}.`, "info");
         },
     });
     pi.registerCommand("omniroute-config", {
